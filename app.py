@@ -1,4 +1,5 @@
 import os
+import tempfile
 from pathlib import Path
 
 import gradio as gr
@@ -39,24 +40,16 @@ def get_model_and_tokenizer():
     return MODEL, TOKENIZER
 
 
-def read_text_file_from_upload(file_obj) -> str:
-    if not file_obj:
+def read_text_file(file_path: str) -> str:
+    if not file_path:
         raise gr.Error("Please upload a .txt file.")
 
-    if isinstance(file_obj, str):
-        path = Path(file_obj)
-        if path.suffix.lower() != ".txt":
-            raise gr.Error("Only .txt files are supported.")
+    path = Path(file_path)
+    if path.suffix.lower() != ".txt":
+        raise gr.Error("Only .txt files are supported.")
 
-        raw_bytes = path.read_bytes()
-    else:
-        file_name = getattr(file_obj, "name", "")
-        if file_name and Path(file_name).suffix.lower() != ".txt":
-            raise gr.Error("Only .txt files are supported.")
-
-        raw_bytes = file_obj if isinstance(file_obj, (bytes, bytearray)) else file_obj.read()
-
-    content = raw_bytes.decode("utf-8", errors="ignore").strip()
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        content = f.read().strip()
 
     if not content:
         raise gr.Error("The uploaded file is empty.")
@@ -79,7 +72,14 @@ def build_prompt(text: str) -> str:
 
 
 def summarize_document(file_obj, max_new_tokens: int, temperature: float, top_p: float) -> str:
-    text = read_text_file_from_upload(file_obj)
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp.write(file_obj)
+        tmp_path = tmp.name
+
+    try:
+        text = read_text_file(tmp_path)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
     model, tokenizer = get_model_and_tokenizer()
     prompt = build_prompt(text)
@@ -115,7 +115,7 @@ with gr.Blocks(title="Llama 2 Document Summarizer") as demo:
     )
 
     with gr.Row():
-        file_input = gr.File(label="Upload .txt file", file_types=[".txt"], type="filepath")
+        file_input = gr.File(label="Upload .txt file", file_types=[".txt"], type="binary")
 
     with gr.Row():
         max_new_tokens = gr.Slider(64, 1024, value=256, step=32, label="Max new tokens")
