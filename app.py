@@ -1,26 +1,24 @@
 import os
-import tempfile
 from pathlib import Path
 
 import gradio as gr
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-MODEL_NAME = os.getenv("MODEL_NAME", "meta-llama/Llama-2-7b-chat-hf")
+MODEL_NAME = os.getenv("MODEL_NAME", "microsoft/phi-2")
 MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "12000"))
 
 
 def load_model_and_tokenizer():
     token = os.getenv("HUGGINGFACEHUB_API_TOKEN") or os.getenv("HF_TOKEN")
 
-    quant_config = BitsAndBytesConfig(load_in_8bit=True)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, token=token)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, token=token, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
-        quantization_config=quant_config,
         device_map="auto",
         token=token,
         torch_dtype=torch.float16,
+        trust_remote_code=True,
     )
 
     if tokenizer.pad_token is None:
@@ -40,16 +38,24 @@ def get_model_and_tokenizer():
     return MODEL, TOKENIZER
 
 
-def read_text_file(file_path: str) -> str:
-    if not file_path:
+def read_text_file_from_upload(file_obj) -> str:
+    if not file_obj:
         raise gr.Error("Please upload a .txt file.")
 
-    path = Path(file_path)
-    if path.suffix.lower() != ".txt":
-        raise gr.Error("Only .txt files are supported.")
+    if isinstance(file_obj, str):
+        path = Path(file_obj)
+        if path.suffix.lower() != ".txt":
+            raise gr.Error("Only .txt files are supported.")
 
-    with path.open("r", encoding="utf-8", errors="ignore") as f:
-        content = f.read().strip()
+        raw_bytes = path.read_bytes()
+    else:
+        file_name = getattr(file_obj, "name", "")
+        if file_name and Path(file_name).suffix.lower() != ".txt":
+            raise gr.Error("Only .txt files are supported.")
+
+        raw_bytes = file_obj if isinstance(file_obj, (bytes, bytearray)) else file_obj.read()
+
+    content = raw_bytes.decode("utf-8", errors="ignore").strip()
 
     if not content:
         raise gr.Error("The uploaded file is empty.")
@@ -72,19 +78,13 @@ def build_prompt(text: str) -> str:
 
 
 def summarize_document(file_obj, max_new_tokens: int, temperature: float, top_p: float) -> str:
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        tmp.write(file_obj)
-        tmp_path = tmp.name
-
-    try:
-        text = read_text_file(tmp_path)
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+    text = read_text_file_from_upload(file_obj)
 
     model, tokenizer = get_model_and_tokenizer()
     prompt = build_prompt(text)
 
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=3500)
+    model_max_length = min(2048, getattr(tokenizer, "model_max_length", 2048))
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=model_max_length)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
     with torch.inference_mode():
@@ -107,15 +107,15 @@ def summarize_document(file_obj, max_new_tokens: int, temperature: float, top_p:
     return summary
 
 
-with gr.Blocks(title="Llama 2 Document Summarizer") as demo:
-    gr.Markdown("# Llama 2 (8-bit) Document Summarizer")
+with gr.Blocks(title="Phi-2 Document Summarizer") as demo:
+    gr.Markdown("# Microsoft Phi-2 Document Summarizer")
     gr.Markdown(
-        "Upload a `.txt` file. The app reads the content and uses a Hugging Face "
-        "Llama 2 model with 8-bit quantization to produce a summary."
+        "Upload a `.txt` file. The app reads the content and uses the Hugging Face "
+        "`microsoft/phi-2` model to produce a summary."
     )
 
     with gr.Row():
-        file_input = gr.File(label="Upload .txt file", file_types=[".txt"], type="binary")
+        file_input = gr.File(label="Upload .txt file", file_types=[".txt"], type="filepath")
 
     with gr.Row():
         max_new_tokens = gr.Slider(64, 1024, value=256, step=32, label="Max new tokens")
